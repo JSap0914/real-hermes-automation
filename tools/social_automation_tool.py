@@ -162,6 +162,113 @@ def _run_once() -> dict[str, Any]:
     }
 
 
+def _split_post_texts(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    raw = str(value or "")
+    # Stable slash-command delimiter for multi-post threads/campaigns.
+    parts = [part.strip() for part in raw.split("||")]
+    return [part for part in parts if part]
+
+
+def _source_for_thread(ledger: Any, *, text: str, source_url: str, title: str) -> str:
+    _ensure_social_agent_path()
+    from social_agent.models import Sink, SourceProvenance, SourceType, TrustLevel, new_id
+
+    source_id = new_id("src")
+    provenance = SourceProvenance(SourceType.PUBLIC_WEB, TrustLevel.VERIFIED, (Sink.MEMORY, Sink.DRAFT, Sink.PUBLIC_POST), source_url=source_url, title=title)
+    ledger.append_source(
+        source_id=source_id,
+        provenance=provenance.to_dict(),
+        content=text,
+        url=source_url,
+        title=title,
+    )
+    return source_id
+
+
+def _plan_thread(args: dict[str, Any]) -> dict[str, Any]:
+    _ensure_social_agent_path()
+    from social_agent.threading import SocialThreadPlanner
+
+    platform = str(args.get("platform") or "x").strip().lower()
+    if platform not in {"x", "threads", "instagram"}:
+        return {"success": False, "error": "platform must be one of: x, threads, instagram"}
+    texts = _split_post_texts(args.get("texts") if "texts" in args else args.get("text"))
+    if not texts:
+        return {"success": False, "error": "thread requires text or texts"}
+    account_id = str(args.get("account_id") or f"{platform}-dry-run")
+    source_url = str(args.get("source_url") or "https://example.com/manual-thread")
+    title = str(args.get("title") or "manual thread proposal")
+    render_preview = bool(args.get("render_preview", True))
+
+    paths, cfg, ledger, Executor, _DraftPipeline = _load_runtime()
+    source_id = _source_for_thread(ledger, text="\n\n".join(texts), source_url=source_url, title=title)
+    plan = SocialThreadPlanner(ledger).create_thread(
+        platform=platform,
+        account_id=account_id,
+        texts=texts,
+        source_ids=[source_id],
+        created_by="social_automation",
+        mode="dry_run",
+    )
+    previews = [Executor(ledger, cfg).execute(item.action_id) for item in plan.items] if render_preview else []
+    return {
+        "success": True,
+        "action": "thread",
+        "group_id": plan.group_id,
+        "platform": plan.platform,
+        "total": plan.total,
+        "items": [item.__dict__ for item in plan.items],
+        "previews": previews,
+        "network_write": False,
+        "database": str(paths["db"]),
+    }
+
+
+def _plan_campaign(args: dict[str, Any]) -> dict[str, Any]:
+    _ensure_social_agent_path()
+    from social_agent.threading import SocialThreadPlanner
+
+    raw_posts = args.get("posts")
+    if not isinstance(raw_posts, dict):
+        return {"success": False, "error": "campaign requires posts as a platform-to-texts object"}
+    posts = {str(platform).lower(): _split_post_texts(texts) for platform, texts in raw_posts.items()}
+    posts = {platform: texts for platform, texts in posts.items() if texts}
+    invalid = sorted(set(posts) - {"x", "threads", "instagram"})
+    if invalid:
+        return {"success": False, "error": f"unsupported campaign platform(s): {', '.join(invalid)}"}
+    if not posts:
+        return {"success": False, "error": "campaign requires at least one non-empty post"}
+    account_ids = {platform: str(args.get("account_ids", {}).get(platform) if isinstance(args.get("account_ids"), dict) else "") or f"{platform}-dry-run" for platform in posts}
+    source_url = str(args.get("source_url") or "https://example.com/manual-campaign")
+    title = str(args.get("title") or "manual campaign proposal")
+    render_preview = bool(args.get("render_preview", True))
+
+    paths, cfg, ledger, Executor, _DraftPipeline = _load_runtime()
+    source_text = "\n\n".join(text for texts in posts.values() for text in texts)
+    source_id = _source_for_thread(ledger, text=source_text, source_url=source_url, title=title)
+    plan = SocialThreadPlanner(ledger).create_campaign(
+        posts=posts,
+        account_ids=account_ids,
+        source_ids=[source_id],
+        created_by="social_automation",
+        mode="dry_run",
+    )
+    previews = [Executor(ledger, cfg).execute(item.action_id) for item in plan.items] if render_preview else []
+    return {
+        "success": True,
+        "action": "campaign",
+        "group_id": plan.group_id,
+        "platform": plan.platform,
+        "total": plan.total,
+        "items": [item.__dict__ for item in plan.items],
+        "previews": previews,
+        "network_write": False,
+        "database": str(paths["db"]),
+    }
+
+
 def _list_actions(args: dict[str, Any]) -> dict[str, Any]:
     _paths, _cfg, ledger, _Executor, _DraftPipeline = _load_runtime()
     limit = int(args.get("limit") or 20)
@@ -230,6 +337,8 @@ def parse_social_command_args(raw_args: str) -> dict[str, Any]:
         "runonce": "run_once",
         "post": "propose",
         "draft": "propose",
+        "threads": "thread",
+        "campaigns": "campaign",
         "audit": "why",
     }
     action = aliases.get(subcommand, subcommand)
@@ -260,6 +369,34 @@ def parse_social_command_args(raw_args: str) -> dict[str, Any]:
             "action": "propose",
             "platform": platform,
             "text": body,
+            "render_preview": True,
+        }
+
+    if action == "thread":
+        platform = "x"
+        body = rest
+        body_parts = rest.split(maxsplit=1)
+        if body_parts and body_parts[0].lower() in {"x", "threads", "instagram"}:
+            platform = body_parts[0].lower()
+            body = body_parts[1].strip() if len(body_parts) > 1 else ""
+        return {
+            "action": "thread",
+            "platform": platform,
+            "text": body,
+            "render_preview": True,
+        }
+
+    if action == "campaign":
+        posts: dict[str, str] = {}
+        for chunk in [part.strip() for part in rest.split(";") if part.strip()]:
+            platform, sep, text = chunk.partition("=")
+            if not sep:
+                platform, sep, text = chunk.partition(":")
+            if sep and platform.strip().lower() in {"x", "threads", "instagram"}:
+                posts[platform.strip().lower()] = text.strip()
+        return {
+            "action": "campaign",
+            "posts": posts,
             "render_preview": True,
         }
 
@@ -295,6 +432,12 @@ def format_social_result(payload: dict[str, Any]) -> str:
         )
     if action == "run_once":
         return f"📣 Social automation run-once completed: {len(payload.get('results') or [])} result(s), network_write=`{payload.get('network_write')}`"
+    if action in {"thread", "campaign"}:
+        return (
+            f"📣 Social automation {action} planned: group=`{payload.get('group_id')}` "
+            f"items=`{payload.get('total')}` previews=`{len(payload.get('previews') or [])}` "
+            f"network_write=`{payload.get('network_write')}`"
+        )
     if action == "list_actions":
         items = payload.get("items") or []
         if not items:
@@ -334,6 +477,10 @@ def social_automation(args: dict[str, Any] | None = None, task_id: str | None = 
             payload = _propose(args)
         elif action == "run_once":
             payload = _run_once()
+        elif action == "thread":
+            payload = _plan_thread(args)
+        elif action == "campaign":
+            payload = _plan_campaign(args)
         elif action in {"list", "list_actions"}:
             payload = _list_actions(args)
         elif action == "preview":
@@ -359,10 +506,14 @@ SOCIAL_AUTOMATION_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["status", "migrate", "propose", "run_once", "list_actions", "preview", "why", "approve"],
+                "enum": ["status", "migrate", "propose", "run_once", "thread", "campaign", "list_actions", "preview", "why", "approve"],
                 "description": "Operation to perform. Use propose for new dry-run social drafts, preview to render a queued action, and why for audit details.",
             },
             "text": {"type": "string", "description": "Source text or instruction for propose."},
+            "texts": {"type": "array", "items": {"type": "string"}, "description": "Ordered post texts for thread planning."},
+            "posts": {"type": "object", "description": "Campaign posts keyed by platform, each value a string with || delimiters or a list of strings."},
+            "account_id": {"type": "string", "description": "Optional platform account/user id for thread planning. Defaults to dry-run placeholder."},
+            "account_ids": {"type": "object", "description": "Optional campaign account ids keyed by platform."},
             "source_url": {"type": "string", "description": "Public source URL for provenance when proposing."},
             "title": {"type": "string", "description": "Source title for provenance when proposing."},
             "platform": {"type": "string", "enum": ["x", "threads", "instagram"], "description": "Social platform for proposed dry-run content."},

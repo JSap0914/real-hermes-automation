@@ -91,3 +91,55 @@ def test_social_command_parser_maps_gateway_friendly_subcommands():
         "text": "hello world",
         "render_preview": True,
     }
+    assert parse_social_command_args("thread threads first post || second post") == {
+        "action": "thread",
+        "platform": "threads",
+        "text": "first post || second post",
+        "render_preview": True,
+    }
+    assert parse_social_command_args("campaign x=first x || second x; threads=first t") == {
+        "action": "campaign",
+        "posts": {"x": "first x || second x", "threads": "first t"},
+        "render_preview": True,
+    }
+
+
+def test_social_automation_thread_plans_ordered_dry_run_group(monkeypatch, tmp_path):
+    home = tmp_path / "hermes-home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    result = _call(
+        action="thread",
+        platform="threads",
+        texts=["First thread post", "Second thread post"],
+    )
+
+    assert result["success"] is True
+    assert result["action"] == "thread"
+    assert result["platform"] == "threads"
+    assert result["total"] == 2
+    assert result["network_write"] is False
+    assert len(result["items"]) == 2
+    assert result["items"][0]["predecessor_action_id"] is None
+    assert result["items"][1]["predecessor_action_id"] == result["items"][0]["action_id"]
+    assert len(result["previews"]) == 2
+    assert result["previews"][0]["state"] == "dry_run_completed"
+    assert result["previews"][1]["result"]["request_payload"]["reply_to_id"].startswith("ledger:")
+
+
+def test_social_automation_campaign_plans_platform_groups(monkeypatch, tmp_path):
+    home = tmp_path / "hermes-home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    result = _call(
+        action="campaign",
+        posts={"x": ["X first", "X second"], "threads": "Threads first"},
+    )
+
+    assert result["success"] is True
+    assert result["action"] == "campaign"
+    assert result["total"] == 3
+    assert result["network_write"] is False
+    assert len(result["items"]) == 3
+    assert {item["platform"] for item in result["items"]} == {"x", "threads"}
+    assert len(result["previews"]) == 3
