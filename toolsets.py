@@ -56,6 +56,8 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
+    # Social automation ledger (dry-run by default; live writes are readiness-gated)
+    "social_automation",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -129,6 +131,12 @@ TOOLSETS = {
     "messaging": {
         "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
         "tools": ["send_message"],
+        "includes": []
+    },
+
+    "social_automation": {
+        "description": "Ledger-backed social automation: dry-run social drafts, previews, approvals, status, and safe execution loop",
+        "tools": ["social_automation"],
         "includes": []
     },
     

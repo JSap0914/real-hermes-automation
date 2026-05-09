@@ -1,0 +1,145 @@
+runtime:
+  dry_run_default: true
+  paused: false
+  database_path: .local/social_agent.sqlite3
+  raw_log_dir: memory/raw
+  wiki_dir: memory/wiki
+  safe_mode: true
+
+policy:
+  platform_policy_version: "2026-04-28"
+  max_post_chars: 280
+  similarity_threshold: 0.82
+  allow_autonomous_live: false
+
+persona:
+  name: "Hermes Social Agent"
+  profile_path: memory/wiki/persona.yaml
+  voice_guide_path: memory/wiki/voice-guide.md
+  language: ko
+  voice: casual_comedic
+  humor_level: 0.7
+  sarcasm_level: 0.2
+  profanity_level: mild
+  version: default-v1
+  require_approval_for_updates: true
+
+brain:
+  provider: fake_hermes
+  provider_profile_id: local-fake-profile
+  artifact_dir: .local/artifacts
+  default_allowed_tools: ["ledger_gateway.create_action", "ledger_gateway.record_artifact"]
+
+providers:
+  fake_hermes:
+    enabled: true
+    provider_name: fake_hermes
+    version: test
+    profile_id: local-fake-profile
+    command: ["fake-hermes", "run"]
+    timeout_seconds: 1800
+  hermes:
+    enabled: false
+    provider_name: hermes
+    version: local-cli
+    profile_id: hermes-local
+    command: ["hermes", "run"]
+    timeout_seconds: 1800
+  codex_cli:
+    enabled: false
+    provider_name: codex_cli
+    version: local-cli
+    profile_id: codex-local
+    command: ["codex", "exec"]
+    timeout_seconds: 1800
+  claude_cli:
+    enabled: false
+    provider_name: claude_cli
+    version: local-cli
+    profile_id: claude-local
+    command: ["claude", "--print"]
+    timeout_seconds: 1800
+
+memory:
+  provider: wiki
+  provider_profile_id: local-wiki
+  wiki_dir: memory/wiki
+  require_ledger_for_agent_writes: true
+
+research:
+  provider: safe_public
+  provider_profile_id: public-default
+  allow_authenticated_scraping: false
+  allow_cookie_browsing: false
+  insane_search_enabled: false
+  allow_bypass_modes: false
+
+messaging:
+  hermes_gateway_enabled: false
+  agent_messenger_enabled: false
+  provider_profile_id: messaging-default
+  allow_desktop_token_extraction: false
+
+experimental:
+  private_session_enabled: false
+  experimental_cookie_write: false
+
+adapters:
+  x:
+    enabled: false
+    live_enabled: false
+    credential_profile_id: null
+    artifact_dir: memory/artifacts/x
+    readiness:
+      docs_reviewed: false
+      scopes_documented: false
+      mocked_tests_passed: false
+      dry_run_preview_passed: false
+      policy_wired: false
+      rate_limits_configured: false
+      idempotency_tests_passed: false
+      manual_live_enable: false
+  threads:
+    enabled: false
+    live_enabled: false
+    credential_profile_id: null
+    artifact_dir: memory/artifacts/threads
+    readiness:
+      docs_reviewed: false
+      scopes_documented: false
+      mocked_tests_passed: false
+      dry_run_preview_passed: false
+      policy_wired: false
+      rate_limits_configured: false
+      idempotency_tests_passed: false
+      manual_live_enable: false
+  instagram:
+    enabled: false
+    live_enabled: false
+    credential_profile_id: null
+    artifact_dir: memory/artifacts/instagram
+    readiness:
+      docs_reviewed: false
+      scopes_documented: false
+      mocked_tests_passed: false
+      dry_run_preview_passed: false
+      policy_wired: false
+      rate_limits_configured: false
+      idempotency_tests_passed: false
+      manual_live_enable: false
+  discord:
+    enabled: true
+    live_enabled: false
+    allowed_channels: ["dev-agent-test"]
+    allowed_users: ["owner"]
+  telegram:
+    enabled: true
+    live_enabled: false
+    owner_ids: ["owner"]
+
+agents:
+  allowed:
+    - name: codex-local
+      channel_id: dev-agent-test
+      repo: .
+      timeout_seconds: 1800
