@@ -84,6 +84,16 @@ class TestCommandRegistry:
             assert not (cmd.cli_only and cmd.gateway_only), \
                 f"{cmd.name} cannot be both cli_only and gateway_only"
 
+    def test_social_command_available_to_cli_and_gateway(self):
+        social = resolve_command("social")
+        assert social is not None
+        assert social.category == "Tools & Skills"
+        assert not social.cli_only
+        assert not social.gateway_only
+        assert "propose" in social.subcommands
+        assert "approve" in social.subcommands
+        assert "social" in GATEWAY_KNOWN_COMMANDS
+
 
 # ---------------------------------------------------------------------------
 # resolve_command tests

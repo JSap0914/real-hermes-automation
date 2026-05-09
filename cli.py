@@ -5390,6 +5390,24 @@ class HermesCLI:
             return
 
         print(f"(._.) Unknown cron command: {subcommand}")
+
+    def _handle_social_command(self, cmd: str):
+        """Handle /social — safe social automation control plane."""
+        try:
+            from tools.social_automation_tool import (
+                format_social_result,
+                parse_social_command_args,
+                social_automation,
+            )
+            args = cmd.split(maxsplit=1)[1] if len(cmd.split(maxsplit=1)) > 1 else ""
+            parsed = parse_social_command_args(args)
+            if parsed.get("error"):
+                print(f"(._.) {parsed['error']}")
+                return
+            result = json.loads(social_automation(parsed))
+            print(format_social_result(result))
+        except Exception as e:
+            print(f"(>_<) Social automation error: {e}")
         print("  Available: list, add, edit, pause, resume, run, remove")
     
     def _handle_skills_command(self, cmd: str):
@@ -5632,6 +5650,8 @@ class HermesCLI:
             self.save_conversation()
         elif canonical == "cron":
             self._handle_cron_command(cmd_original)
+        elif canonical == "social":
+            self._handle_social_command(cmd_original)
         elif canonical == "skills":
             with self._busy_command(self._slow_command_status(cmd_original)):
                 self._handle_skills_command(cmd_original)

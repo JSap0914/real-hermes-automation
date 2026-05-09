@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from tools.social_automation_tool import social_automation
+from tools.social_automation_tool import parse_social_command_args, social_automation
 from toolsets import resolve_toolset
 
 
@@ -74,3 +74,20 @@ def test_social_automation_run_once_renders_unpreviewed_dry_run(monkeypatch, tmp
 
 def test_social_automation_is_in_default_hermes_toolset():
     assert "social_automation" in resolve_toolset("hermes-cli")
+
+
+def test_social_command_parser_maps_gateway_friendly_subcommands():
+    assert parse_social_command_args("") == {"action": "status"}
+    assert parse_social_command_args("run-once") == {"action": "run_once"}
+    assert parse_social_command_args("why act_123") == {"action": "why", "action_id": "act_123"}
+    assert parse_social_command_args("approve act_123 owner") == {
+        "action": "approve",
+        "action_id": "act_123",
+        "approver": "owner",
+    }
+    assert parse_social_command_args("propose threads hello world") == {
+        "action": "propose",
+        "platform": "threads",
+        "text": "hello world",
+        "render_preview": True,
+    }

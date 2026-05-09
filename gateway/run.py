@@ -3230,6 +3230,9 @@ class GatewayRunner:
         if canonical == "reload-mcp":
             return await self._handle_reload_mcp_command(event)
 
+        if canonical == "social":
+            return await self._handle_social_command(event)
+
         if canonical == "approve":
             return await self._handle_approve_command(event)
 
@@ -7058,6 +7061,24 @@ class GatewayRunner:
         except Exception as e:
             logger.warning("MCP reload failed: %s", e)
             return f"❌ MCP reload failed: {e}"
+
+    async def _handle_social_command(self, event: MessageEvent) -> str:
+        """Handle /social command for Telegram/Discord control surfaces."""
+        try:
+            from tools.social_automation_tool import (
+                format_social_result,
+                parse_social_command_args,
+                social_automation,
+            )
+
+            parsed = parse_social_command_args(event.get_command_args())
+            if parsed.get("error"):
+                return f"📣 Social automation error: {parsed['error']}"
+            result = json.loads(social_automation(parsed))
+            return format_social_result(result)
+        except Exception as e:
+            logger.exception("Failed to handle /social command")
+            return f"❌ Social automation command failed: {e}"
 
     # ------------------------------------------------------------------
     # /approve & /deny — explicit dangerous-command approval

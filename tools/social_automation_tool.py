@@ -207,6 +207,120 @@ def _approve(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def parse_social_command_args(raw_args: str) -> dict[str, Any]:
+    """Parse `/social ...` slash-command arguments into tool arguments.
+
+    This intentionally supports a small, stable control-plane vocabulary for
+    Telegram/Discord/CLI users.  Richer planning still goes through the agent
+    loop, which can call the same tool schema directly.
+    """
+    text = (raw_args or "").strip()
+    if not text:
+        return {"action": "status"}
+
+    parts = text.split(maxsplit=1)
+    subcommand = parts[0].lower().replace("-", "_")
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    aliases = {
+        "list": "list_actions",
+        "ls": "list_actions",
+        "run": "run_once",
+        "run_once": "run_once",
+        "runonce": "run_once",
+        "post": "propose",
+        "draft": "propose",
+        "audit": "why",
+    }
+    action = aliases.get(subcommand, subcommand)
+
+    if action in {"status", "migrate", "run_once", "list_actions"}:
+        args: dict[str, Any] = {"action": action}
+        if action == "list_actions" and rest:
+            args["state"] = rest
+        return args
+
+    if action in {"preview", "why", "approve"}:
+        if not rest:
+            return {"action": action, "error": f"{action} requires an action_id"}
+        first, _, tail = rest.partition(" ")
+        args = {"action": action, "action_id": first}
+        if action == "approve" and tail.strip():
+            args["approver"] = tail.strip()
+        return args
+
+    if action == "propose":
+        platform = "x"
+        body = rest
+        body_parts = rest.split(maxsplit=1)
+        if body_parts and body_parts[0].lower() in {"x", "threads", "instagram"}:
+            platform = body_parts[0].lower()
+            body = body_parts[1].strip() if len(body_parts) > 1 else ""
+        return {
+            "action": "propose",
+            "platform": platform,
+            "text": body,
+            "render_preview": True,
+        }
+
+    return {"action": action}
+
+
+def format_social_result(payload: dict[str, Any]) -> str:
+    """Return a concise human-readable result for slash-command surfaces."""
+    if not payload.get("success"):
+        return f"📣 Social automation error: {payload.get('error', 'unknown error')}"
+
+    action = payload.get("action")
+    if action == "status":
+        status = payload.get("status") or {}
+        counts = ", ".join(f"{key}={value}" for key, value in sorted(status.items())) or "empty"
+        return (
+            "📣 **Social automation status**\n"
+            f"DB: `{payload.get('database')}`\n"
+            f"Dry-run default: `{payload.get('dry_run_default')}`\n"
+            f"Queue: {counts}"
+        )
+    if action == "migrate":
+        return f"📣 Social automation ledger ready: `{payload.get('database')}`"
+    if action == "propose":
+        preview = payload.get("preview") or {}
+        return (
+            "📣 **Dry-run social proposal created**\n"
+            f"Action: `{payload.get('action_id')}`\n"
+            f"Platform: `{payload.get('platform')}`\n"
+            f"State: `{payload.get('state')}`\n"
+            f"Network write: `{preview.get('network_write', payload.get('network_write'))}`\n"
+            f"Draft: {((payload.get('drafts') or [''])[0])}"
+        )
+    if action == "run_once":
+        return f"📣 Social automation run-once completed: {len(payload.get('results') or [])} result(s), network_write=`{payload.get('network_write')}`"
+    if action == "list_actions":
+        items = payload.get("items") or []
+        if not items:
+            return "📣 No social automation actions found."
+        lines = ["📣 **Social automation actions**"]
+        for item in items[:10]:
+            lines.append(f"- `{item['action_id']}` {item['platform']}/{item['action_type']} state=`{item['state']}`")
+        return "\n".join(lines)
+    if action == "preview":
+        result = payload.get("result") or {}
+        return f"📣 Preview rendered for `{result.get('action_id')}` state=`{result.get('state')}` network_write=`{payload.get('network_write')}`"
+    if action == "why":
+        why = payload.get("why") or {}
+        approval = why.get("approval") or {}
+        return (
+            "📣 **Social action audit**\n"
+            f"Action: `{why.get('action_id')}`\n"
+            f"State: `{approval.get('state')}`\n"
+            f"Events: `{len(why.get('events') or [])}`"
+        )
+    if action == "approve":
+        item = payload.get("item") or {}
+        return f"📣 Approved `{item.get('action_id')}` into state `{item.get('state')}`. {payload.get('note')}"
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
 def social_automation(args: dict[str, Any] | None = None, task_id: str | None = None) -> str:
     """Run safe social automation actions against the Hermes profile ledger."""
     args = dict(args or {})
