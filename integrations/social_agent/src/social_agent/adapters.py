@@ -192,9 +192,10 @@ class FakeSocialHttpTransport:
     that a live adapter would send only after the ledger/readiness gates pass.
     """
 
-    def __init__(self, *, status_code: int = 200, json_body: dict[str, Any] | None = None):
+    def __init__(self, *, status_code: int = 200, json_body: dict[str, Any] | None = None, json_bodies: list[dict[str, Any]] | None = None):
         self.status_code = status_code
         self.json_body = json_body or {}
+        self.json_bodies = [dict(body) for body in json_bodies] if json_bodies is not None else None
         self.calls: list[dict[str, Any]] = []
 
     @property
@@ -204,7 +205,11 @@ class FakeSocialHttpTransport:
     def post(self, *, platform: str, endpoint: str, payload: dict[str, Any], headers: dict[str, str]) -> FakeSocialHttpResponse:
         call = {"method": "POST", "platform": platform, "endpoint": endpoint, "payload": dict(payload), "headers": dict(headers)}
         self.calls.append(call)
-        body = dict(self.json_body)
+        if self.json_bodies:
+            index = min(len(self.calls) - 1, len(self.json_bodies) - 1)
+            body = dict(self.json_bodies[index])
+        else:
+            body = dict(self.json_body)
         body.setdefault("id", f"{platform}-fake-{len(self.calls)}")
         return FakeSocialHttpResponse(self.status_code, body)
 
@@ -280,7 +285,7 @@ class OfficialSocialAdapter:
                 "preview": True,
                 "http_method": "POST",
                 "endpoint": self.endpoint,
-            "request_payload": self._request_payload(envelope, resolve_remote=False),
+                "request_payload": self._request_payload(envelope, resolve_remote=False),
             }
         )
         return payload
@@ -296,18 +301,7 @@ class OfficialSocialAdapter:
         if envelope.mode == "dry_run":
             return self.dry_run(envelope)
 
-        ledger_state = self._require_live_ledger_state(envelope)
-        if ledger_state not in {"approved_for_live", "scheduled", "executing"} or envelope.approval.state not in {ApprovalState.APPROVED_FOR_LIVE, ApprovalState.SCHEDULED, ApprovalState.EXECUTING}:
-            raise AdapterError("live adapter blocked: state is not approved")
-        if not self.config.enabled:
-            raise AdapterError(f"live adapter blocked: {self.name} adapter is disabled")
-        if not self.config.live_enabled:
-            raise AdapterError(f"live adapter blocked: {self.name} live_enabled is false")
-        missing = _missing_readiness(self.config.readiness)
-        if missing:
-            raise AdapterError(f"live adapter blocked: readiness gates incomplete ({', '.join(missing)})")
-        if envelope.execution["idempotency_key"] in self._executed:
-            raise AdapterError("duplicate idempotency key")
+        self._require_live_ready(envelope)
 
         response = self.transport.post(
             platform=self.name,
@@ -331,6 +325,7 @@ class OfficialSocialAdapter:
                 "preview": False,
                 "http_method": "POST",
                 "endpoint": self.endpoint,
+                "request_payload": self._request_payload(envelope, resolve_remote=True),
                 "status_code": response.status_code,
                 "remote_id": remote_id,
             }
@@ -338,6 +333,20 @@ class OfficialSocialAdapter:
         if self.ledger is not None:
             self.ledger.record_adapter_result(envelope, self.name, result)
         return result
+
+    def _require_live_ready(self, envelope: ActionEnvelope) -> None:
+        ledger_state = self._require_live_ledger_state(envelope)
+        if ledger_state not in {"approved_for_live", "scheduled", "executing"} or envelope.approval.state not in {ApprovalState.APPROVED_FOR_LIVE, ApprovalState.SCHEDULED, ApprovalState.EXECUTING}:
+            raise AdapterError("live adapter blocked: state is not approved")
+        if not self.config.enabled:
+            raise AdapterError(f"live adapter blocked: {self.name} adapter is disabled")
+        if not self.config.live_enabled:
+            raise AdapterError(f"live adapter blocked: {self.name} live_enabled is false")
+        missing = _missing_readiness(self.config.readiness)
+        if missing:
+            raise AdapterError(f"live adapter blocked: readiness gates incomplete ({', '.join(missing)})")
+        if envelope.execution["idempotency_key"] in self._executed:
+            raise AdapterError("duplicate idempotency key")
 
     def _validate_envelope(self, envelope: ActionEnvelope) -> None:
         if envelope.target.platform != self.platform:
@@ -424,13 +433,146 @@ class OfficialXAdapter(OfficialSocialAdapter):
             ledger = None
         super().__init__(Platform.X, "/2/tweets", supported_actions={ActionType.PUBLISH_POST, ActionType.REPLY_TO_POST}, ledger=ledger, config=config, readiness=readiness, live_enabled=live_enabled, transport=transport)
 
+    def _request_payload(self, envelope: ActionEnvelope, *, resolve_remote: bool) -> dict[str, Any]:
+        data: dict[str, Any] = {"text": envelope.content.text}
+        if envelope.action_type == ActionType.REPLY_TO_POST:
+            reply_target = self._resolve_reply_target(envelope, resolve_remote=resolve_remote)
+            if reply_target:
+                data["reply"] = {"in_reply_to_tweet_id": reply_target}
+        return data
+
 
 class OfficialThreadsAdapter(OfficialSocialAdapter):
     def __init__(self, ledger: ActionLedger | None = None, config: AdapterConfig | None = None, readiness: dict[str, bool] | bool | None = None, live_enabled: bool | None = None, transport: FakeSocialHttpTransport | None = None):
         if isinstance(ledger, dict) or isinstance(ledger, bool):
             readiness = ledger
             ledger = None
-        super().__init__(Platform.THREADS, "/threads/publish", supported_actions={ActionType.PUBLISH_POST, ActionType.REPLY_TO_POST}, ledger=ledger, config=config, readiness=readiness, live_enabled=live_enabled, transport=transport)
+        super().__init__(Platform.THREADS, "/{threads-user-id}/threads", supported_actions={ActionType.PUBLISH_POST, ActionType.REPLY_TO_POST}, ledger=ledger, config=config, readiness=readiness, live_enabled=live_enabled, transport=transport)
+
+    def dry_run(self, envelope: ActionEnvelope) -> dict[str, Any]:
+        self._validate_envelope(envelope)
+        if self.ledger is not None:
+            try:
+                self.ledger.state(envelope.action_id)
+            except LedgerError as exc:
+                raise AdapterError("external side effects require an action ledger record") from exc
+        create_payload = self._request_payload(envelope, resolve_remote=False)
+        publish_payload = {"creation_id": f"container:{envelope.action_id}"}
+        payload = self._base_payload(envelope)
+        payload.update(
+            {
+                "dry_run": True,
+                "network_write": False,
+                "preview": True,
+                "http_method": "POST",
+                "endpoint": self._create_endpoint(envelope),
+                "publish_endpoint": self._publish_endpoint(envelope),
+                "request_payload": create_payload,
+                "request_sequence": [
+                    {
+                        "step": "create_container",
+                        "method": "POST",
+                        "endpoint": self._create_endpoint(envelope),
+                        "payload": create_payload,
+                    },
+                    {
+                        "step": "publish_container",
+                        "method": "POST",
+                        "endpoint": self._publish_endpoint(envelope),
+                        "payload": publish_payload,
+                    },
+                ],
+            }
+        )
+        return payload
+
+    def execute(self, envelope: ActionEnvelope) -> dict[str, Any]:
+        self._validate_envelope(envelope)
+        if envelope.mode == "dry_run":
+            return self.dry_run(envelope)
+
+        self._require_live_ready(envelope)
+
+        create_payload = self._request_payload(envelope, resolve_remote=True)
+        create_response = self.transport.post(
+            platform=self.name,
+            endpoint=self._create_endpoint(envelope),
+            payload=create_payload,
+            headers={
+                "Idempotency-Key": envelope.execution["idempotency_key"],
+                "X-Credential-Profile": self.config.credential_profile_id or "",
+            },
+        )
+        if create_response.status_code >= 400:
+            raise AdapterError(f"{self.name} fake HTTP container creation failed with status {create_response.status_code}")
+
+        creation_id = str(create_response.json_body.get("id") or f"{self.name}-container-{envelope.action_id}")
+        publish_payload = {"creation_id": creation_id}
+        publish_response = self.transport.post(
+            platform=self.name,
+            endpoint=self._publish_endpoint(envelope),
+            payload=publish_payload,
+            headers={
+                "Idempotency-Key": envelope.execution["idempotency_key"],
+                "X-Credential-Profile": self.config.credential_profile_id or "",
+            },
+        )
+        if publish_response.status_code >= 400:
+            raise AdapterError(f"{self.name} fake HTTP publish failed with status {publish_response.status_code}")
+
+        self._executed.add(envelope.execution["idempotency_key"])
+        remote_id = str(publish_response.json_body.get("id") or creation_id)
+        result = self._base_payload(envelope)
+        result.update(
+            {
+                "dry_run": False,
+                "network_write": True,
+                "preview": False,
+                "http_method": "POST",
+                "endpoint": self._publish_endpoint(envelope),
+                "publish_endpoint": self._publish_endpoint(envelope),
+                "request_payload": create_payload,
+                "container_id": creation_id,
+                "status_code": publish_response.status_code,
+                "remote_id": remote_id,
+                "request_sequence": [
+                    {
+                        "step": "create_container",
+                        "method": "POST",
+                        "endpoint": self._create_endpoint(envelope),
+                        "payload": create_payload,
+                        "status_code": create_response.status_code,
+                    },
+                    {
+                        "step": "publish_container",
+                        "method": "POST",
+                        "endpoint": self._publish_endpoint(envelope),
+                        "payload": publish_payload,
+                        "status_code": publish_response.status_code,
+                    },
+                ],
+            }
+        )
+        if self.ledger is not None:
+            self.ledger.record_adapter_result(envelope, self.name, result)
+        return result
+
+    def _request_payload(self, envelope: ActionEnvelope, *, resolve_remote: bool) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "media_type": "TEXT",
+            "text": envelope.content.text,
+        }
+        if envelope.action_type == ActionType.REPLY_TO_POST:
+            reply_target = self._resolve_reply_target(envelope, resolve_remote=resolve_remote)
+            if reply_target:
+                data["reply_to_id"] = reply_target
+        return data
+
+    def _create_endpoint(self, envelope: ActionEnvelope) -> str:
+        return f"/{envelope.target.account_or_channel_id}/threads"
+
+    def _publish_endpoint(self, envelope: ActionEnvelope) -> str:
+        return f"/{envelope.target.account_or_channel_id}/threads_publish"
 
 
 class OfficialInstagramAdapter(OfficialSocialAdapter):
