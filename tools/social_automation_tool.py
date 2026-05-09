@@ -105,6 +105,40 @@ def _status() -> dict[str, Any]:
     }
 
 
+def _readiness(args: dict[str, Any]) -> dict[str, Any]:
+    _ensure_social_agent_path()
+    from social_agent.adapters import READINESS_FLAGS, SAFE_ENV_RE
+
+    requested = str(args.get("platform") or "all").strip().lower()
+    platforms = ["x", "threads", "instagram"] if requested in {"", "all"} else [requested]
+    invalid = sorted(set(platforms) - {"x", "threads", "instagram"})
+    if invalid:
+        return {"success": False, "error": f"unsupported readiness platform(s): {', '.join(invalid)}"}
+
+    _paths, cfg, _ledger, _Executor, _DraftPipeline = _load_runtime()
+    guides = {}
+    for platform in platforms:
+        adapter = cfg.adapter(platform)
+        profile = str(args.get("credential_profile_id") or adapter.credential_profile_id or f"{platform}-operator")
+        env_name = "SOCIAL_AGENT_CREDENTIAL_" + SAFE_ENV_RE.sub("_", profile.upper())
+        guides[platform] = {
+            "enabled": adapter.enabled,
+            "live_enabled": adapter.live_enabled,
+            "ready_for_live": adapter.ready_for_live(),
+            "credential_profile_id": profile,
+            "credential_env_var": env_name,
+            "required_flags": list(READINESS_FLAGS),
+            "missing_flags": [flag for flag in READINESS_FLAGS if not adapter.readiness.get(flag, False)],
+            "live_write_policy": "blocked until adapter.enabled, adapter.live_enabled, every readiness flag, ledger approval, and credential env var are all present",
+        }
+    return {
+        "success": True,
+        "action": "readiness",
+        "platforms": guides,
+        "network_write": False,
+    }
+
+
 def _migrate() -> dict[str, Any]:
     paths, _cfg, ledger, _Executor, _DraftPipeline = _load_runtime()
     return {
@@ -339,14 +373,18 @@ def parse_social_command_args(raw_args: str) -> dict[str, Any]:
         "draft": "propose",
         "threads": "thread",
         "campaigns": "campaign",
+        "ready": "readiness",
+        "readiness": "readiness",
         "audit": "why",
     }
     action = aliases.get(subcommand, subcommand)
 
-    if action in {"status", "migrate", "run_once", "list_actions"}:
+    if action in {"status", "migrate", "run_once", "readiness", "list_actions"}:
         args: dict[str, Any] = {"action": action}
         if action == "list_actions" and rest:
             args["state"] = rest
+        if action == "readiness" and rest:
+            args["platform"] = rest
         return args
 
     if action in {"preview", "why", "approve"}:
@@ -420,6 +458,14 @@ def format_social_result(payload: dict[str, Any]) -> str:
         )
     if action == "migrate":
         return f"📣 Social automation ledger ready: `{payload.get('database')}`"
+    if action == "readiness":
+        lines = ["📣 **Social automation readiness**"]
+        for platform, guide in sorted((payload.get("platforms") or {}).items()):
+            lines.append(
+                f"- `{platform}` ready=`{guide.get('ready_for_live')}` "
+                f"env=`{guide.get('credential_env_var')}` missing=`{len(guide.get('missing_flags') or [])}`"
+            )
+        return "\n".join(lines)
     if action == "propose":
         preview = payload.get("preview") or {}
         return (
@@ -471,6 +517,8 @@ def social_automation(args: dict[str, Any] | None = None, task_id: str | None = 
     try:
         if action == "status":
             payload = _status()
+        elif action == "readiness":
+            payload = _readiness(args)
         elif action == "migrate":
             payload = _migrate()
         elif action == "propose":
@@ -506,7 +554,7 @@ SOCIAL_AUTOMATION_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["status", "migrate", "propose", "run_once", "thread", "campaign", "list_actions", "preview", "why", "approve"],
+                "enum": ["status", "readiness", "migrate", "propose", "run_once", "thread", "campaign", "list_actions", "preview", "why", "approve"],
                 "description": "Operation to perform. Use propose for new dry-run social drafts, preview to render a queued action, and why for audit details.",
             },
             "text": {"type": "string", "description": "Source text or instruction for propose."},

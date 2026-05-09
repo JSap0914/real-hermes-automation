@@ -79,6 +79,7 @@ def test_social_automation_is_in_default_hermes_toolset():
 def test_social_command_parser_maps_gateway_friendly_subcommands():
     assert parse_social_command_args("") == {"action": "status"}
     assert parse_social_command_args("run-once") == {"action": "run_once"}
+    assert parse_social_command_args("readiness threads") == {"action": "readiness", "platform": "threads"}
     assert parse_social_command_args("why act_123") == {"action": "why", "action_id": "act_123"}
     assert parse_social_command_args("approve act_123 owner") == {
         "action": "approve",
@@ -125,6 +126,24 @@ def test_social_automation_thread_plans_ordered_dry_run_group(monkeypatch, tmp_p
     assert len(result["previews"]) == 2
     assert result["previews"][0]["state"] == "dry_run_completed"
     assert result["previews"][1]["result"]["request_payload"]["reply_to_id"].startswith("ledger:")
+
+
+def test_social_automation_readiness_reports_env_names_without_live_writes(monkeypatch, tmp_path):
+    home = tmp_path / "hermes-home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    result = _call(action="readiness", platform="threads", credential_profile_id="threads-owner")
+
+    assert result["success"] is True
+    assert result["action"] == "readiness"
+    assert result["network_write"] is False
+    assert set(result["platforms"]) == {"threads"}
+    guide = result["platforms"]["threads"]
+    assert guide["credential_profile_id"] == "threads-owner"
+    assert guide["credential_env_var"] == "SOCIAL_AGENT_CREDENTIAL_THREADS_OWNER"
+    assert guide["ready_for_live"] is False
+    assert "manual_live_enable" in guide["missing_flags"]
+    assert "credential" in guide["live_write_policy"]
 
 
 def test_social_automation_campaign_plans_platform_groups(monkeypatch, tmp_path):
